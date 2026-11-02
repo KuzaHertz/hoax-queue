@@ -94,11 +94,19 @@ def fetch_jobs():
 
 
 def context(p, headless=True):
-    return p.chromium.launch_persistent_context(
-        PROFILE, headless=headless, user_agent=UA,
-        viewport={"width": 1280, "height": 2400},
-        locale="en-MY", timezone_id="Asia/Kuala_Lumpur",
-        args=["--disable-blink-features=AutomationControlled"])
+    # Login runs in a normal-sized window (no huge viewport); posting runs headless.
+    kwargs = dict(
+        headless=headless,
+        user_agent=UA,
+        locale="en-MY",
+        timezone_id="Asia/Kuala_Lumpur",
+        args=["--disable-blink-features=AutomationControlled", "--window-size=1280,820"],
+    )
+    if headless:
+        kwargs["viewport"] = {"width": 1280, "height": 1000}
+    else:
+        kwargs["viewport"] = None          # use the real window size, fits any screen
+    return p.chromium.launch_persistent_context(PROFILE, **kwargs)
 
 
 def do_login():
@@ -108,6 +116,10 @@ def do_login():
         ctx = context(p, headless=False)
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         pg.goto("https://www.threads.com/", timeout=60000)
+        try:
+            pg.bring_to_front()
+        except Exception:
+            pass
         print("\n=== Log in to Threads in the window that just opened ===")
         print("When you're logged in and can see your feed, come back here.")
         input("Press Enter to save the session... ")
