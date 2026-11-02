@@ -147,14 +147,16 @@ def do_login():
 
 
 def post_job(job):
-    """Post one job into its community. Returns permalink or None."""
+    """Post one job into its community. Returns permalink/'posted' or None."""
     from playwright.sync_api import sync_playwright
     text = (job.get("text") or "").strip()
     community = (job.get("community") or "").strip()
     if not text or not community:
         log(f"job {job['_id']}: missing text/community, skipping")
         return None
-    first_line = next((l.strip() for l in text.split("\n") if l.strip()), "")[:40]
+    first_line = next((l.strip() for l in text.split("\n") if l.strip()), "")
+    frag = first_line[:40]
+    shot = os.path.join(BASE, f"fail_{job['_id']}.png")
 
     with sync_playwright() as p:
         ctx = context(p)
@@ -167,7 +169,6 @@ def post_job(job):
                 log("SESSION EXPIRED — run: python hoax_worker.py --login")
                 return None
 
-            # find the community composer label ("Post about X...")
             label = pg.evaluate("""() => {
                 const els = [...document.querySelectorAll('*')].filter(e =>
                     e.children.length === 0 && (e.textContent || '').trim().startsWith('Post about '));
@@ -175,53 +176,81 @@ def post_job(job):
             }""")
             if not label:
                 log("composer not found on community page")
+                pg.screenshot(path=shot)
                 return None
 
-            clicked = pg.evaluate("""(label) => {
+            pg.evaluate("""(label) => {
                 const els = [...document.querySelectorAll('*')].filter(e =>
                     e.children.length === 0 && (e.textContent || '').trim() === label);
-                if (!els.length) return false;
+                if (!els.length) return;
                 const el = els[0];
                 (el.closest('[role="button"]') || el.closest('button') || el.parentElement).click();
-                return true;
             }""", label)
-            if not clicked:
-                log("could not open composer")
+            pg.wait_for_timeout(3000)
+
+            # Type into the composer and CONFIRM the text actually landed.
+            typed_ok = False
+            for attempt in range(3):
+                try:
+                    box = pg.locator("[contenteditable='true'][role='textbox']").first
+                    box.click(timeout=10000)
+                    pg.wait_for_timeout(400)
+                    pg.keyboard.press("Control+A")
+                    pg.keyboard.press("Delete")
+                    pg.keyboard.type(text, delay=12)
+                    pg.wait_for_timeout(1200)
+                    got = pg.evaluate("""() => {
+                        const el = document.querySelector("[contenteditable='true'][role='textbox']");
+                        return el ? (el.innerText || el.textContent || '') : '';
+                    }""")
+                    if frag[:25].lower() in (got or '').lower():
+                        typed_ok = True
+                        break
+                    log(f"typing attempt {attempt+1}: text not in composer, retrying")
+                except Exception as e:
+                    log(f"typing attempt {attempt+1} error: {e}")
+                pg.wait_for_timeout(800)
+
+            if not typed_ok:
+                log("could not enter text into composer")
+                pg.screenshot(path=shot)
                 return None
 
-            pg.wait_for_timeout(2500)
-            box = pg.locator("[role='textbox']").first
-            box.click()
-            pg.keyboard.type(text, delay=8)
-            pg.wait_for_timeout(1200)
-
-            # the composer's Post button is the LAST visible one
-            posted = pg.evaluate("""() => {
+            # Click the composer's Post button (last visible one).
+            clicked = pg.evaluate("""() => {
                 const btns = [...document.querySelectorAll('[role="button"], button')]
                     .filter(b => (b.textContent || '').trim() === 'Post' && b.offsetParent !== null);
                 if (!btns.length) return false;
                 btns[btns.length - 1].click();
                 return true;
             }""")
-            if not posted:
+            if not clicked:
                 log("Post button not found")
+                pg.screenshot(path=shot)
                 return None
 
-            pg.wait_for_timeout(8000)
-            body2 = pg.inner_text("body")
-            if label in body2:
-                # composer closed, looks published; try to grab a permalink
-                perm = pg.evaluate("""() => {
-                    const a = [...document.querySelectorAll('a[href*="/post/"]')]
-                        .map(x => x.href).filter(h => h.includes('yyyhertz'));
-                    return a.length ? a[0] : null;
-                }""")
-                log(f"posted{(' -> ' + perm) if perm else ''}")
-                return perm or "posted"
-            log("posted but could not verify page state")
-            return "posted-unverified"
+            pg.wait_for_timeout(9000)
+
+            # VERIFY on the profile: the post must actually be there.
+            try:
+                pg.goto("https://www.threads.com/@yyyhertz", wait_until="domcontentloaded", timeout=60000)
+                pg.wait_for_timeout(7000)
+                prof = pg.inner_text("body")
+                if frag[:30].lower() in prof.lower():
+                    log("VERIFIED on profile")
+                    return "posted"
+            except Exception as e:
+                log(f"profile verification error: {e}")
+
+            log("NOT verified on profile — will retry next cycle")
+            pg.screenshot(path=shot)
+            return None
         except Exception as e:
             log(f"post error: {e}")
+            try:
+                pg.screenshot(path=shot)
+            except Exception:
+                pass
             return None
         finally:
             ctx.close()
@@ -241,13 +270,12 @@ def main():
             log(f"{len(pending)} new job(s)")
             for job in sorted(pending, key=lambda j: j.get("created", "")):
                 result = post_job(job)
-                if result and result != "posted-unverified":
+                if result == "posted":
                     done.add(job["_id"])
                     save_done(done)
-                elif result is None:
-                    log("job failed; will retry next cycle")
-                    if not login_alerted and "SESSION" not in "":
-                        login_alerted = True
+                    log(f"job {job['_id']} marked done")
+                else:
+                    log(f"job {job['_id']} failed; will retry next cycle")
         time.sleep(POLL_SECONDS)
 
 
