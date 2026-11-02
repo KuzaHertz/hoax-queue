@@ -100,7 +100,9 @@ def context(p, headless=True):
         user_agent=UA,
         locale="en-MY",
         timezone_id="Asia/Kuala_Lumpur",
-        args=["--disable-blink-features=AutomationControlled", "--window-size=1280,820"],
+        device_scale_factor=1,
+        args=["--disable-blink-features=AutomationControlled",
+              "--force-device-scale-factor=1", "--window-size=1280,900"],
     )
     if headless:
         kwargs["viewport"] = {"width": 1280, "height": 1000}
@@ -118,6 +120,19 @@ def do_login():
         pg.goto("https://www.threads.com/", timeout=60000)
         try:
             pg.bring_to_front()
+        except Exception:
+            pass
+        # Instagram/Threads login pages render zoomed with the form below the fold.
+        # Zoom out and scroll so the form is visible on normal screens.
+        pg.wait_for_timeout(3000)
+        for _ in range(2):
+            try:
+                pg.keyboard.press("Control+Minus")
+            except Exception:
+                break
+        pg.wait_for_timeout(1500)
+        try:
+            pg.mouse.wheel(0, 1200)
         except Exception:
             pass
         print("\n=== Log in to Threads in the window that just opened ===")
